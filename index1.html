@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyberpunk Particle System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            overflow: hidden;
+            font-family: 'Orbitron', monospace;
+            background: #000;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        #video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .hud {
+            position: fixed;
+            color: #0ff;
+            font-size: 14px;
+            text-shadow: 0 0 10px #0ff;
+            z-index: 1000;
+            pointer-events: none;
+        }
+
+        #fps {
+            top: 20px;
+            left: 20px;
+        }
+
+        #particles {
+            top: 20px;
+            right: 20px;
+        }
+
+        #hands {
+            bottom: 20px;
+            left: 20px;
+        }
+
+        #mode {
+            bottom: 20px;
+            right: 20px;
+            font-size: 18px;
+        }
+
+        .finger-label {
+            position: fixed;
+            color: #0ff;
+            font-size: 12px;
+            font-family: 'Orbitron', monospace;
+            text-shadow: 0 0 10px #0ff;
+            pointer-events: none;
+            z-index: 1001;
+            transition: all 0.1s;
+        }
+
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0ff;
+            font-size: 24px;
+            text-shadow: 0 0 20px #0ff;
+            z-index: 2000;
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="container">
+        <video id="video" width="640" height="480" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+        
+        <div id="fps" class="hud">FPS: 0</div>
+        <div id="particles" class="hud">PARTICLES: 0</div>
+        <div id="hands" class="hud">HANDS: 0</div>
+        <div id="mode" class="hud">MODE: DEFAULT</div>
+        
+        <div id="loading">INITIALIZING SYSTEM...</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1632432234/camera_utils.min.js"></script>
+
+    <script>
+        // Initialize Three.js Scene
+        const canvas = document.getElementById('canvas');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+        
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        camera.position.z = 50;
+
+        // Particle System
+        const PARTICLE_COUNT = 12000;
+        const PARTICLE_SIZE = 2.4;
+        
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const velocities = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        
+        // Initialize particles
+        for (let i = 0; i < PARTICLE_COUNT * 3; i += 3) {
+            positions[i] = (Math.random() - 0.5) * 200;
+            positions[i + 1] = (Math.random() - 0.5) * 200;
+            positions[i + 2] = (Math.random() - 0.5) * 100;
+            
+            velocities[i] = 0;
+            velocities[i + 1] = 0;
+            velocities[i + 2] = 0;
+            
+            colors[i] = 0;
+            colors[i + 1] = 1;
+            colors[i + 2] = 1;
+        }
+        
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        
+        const material = new THREE.PointsMaterial({
+            size: PARTICLE_SIZE,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            opacity: 0.8,
+            sizeAttenuation: true
+        });
+        
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        // Hand tracking state
+        let hands = [];
+        let leftHandCenter = null;
+        let rightHandCenter = null;
+        let leftHandFingers = {};
+        let rightHandFingers = {};
+        let mode = 'DEFAULT';
+        
+        // Finger labels
+        const fingerLabels = {
+            1: 'Hello',
+            2: 'Gemini3',
+            3: '非常好用',
+            4: '再见',
+            5: 'Catch Mode'
+        };
+        
+        const fingerColors = {
+            1: { text: 'Hello', color: '#0x00FFFF' },
+            2: { text: 'Gemini3', color: '#0xFFFF00' },
+            3: { text: 'Text "非常好用"', color: '#0xFF00FF' },
+            4: { text: '再见', color: '#0x00FF88' },
+            5: { text: 'Catch Mode', color: '#0xFF0000' }
+        };
+
+        // MediaPipe Hands Setup
+        const video = document.getElementById('video');
+        let handsDetector;
+        
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: 640, height: 480 }
+                });
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => resolve(video);
+                });
+            } catch (error) {
+                console.error('Camera error:', error);
+                document.getElementById('loading').textContent = 'CAMERA ACCESS DENIED';
+            }
+        }
+        
+        async function setupHands() {
+            handsDetector = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+            });
+            
+            handsDetector.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            handsDetector.onResults(onHandsResults);
+            
+            const cameraInstance = new Camera(video, {
+                onFrame: async () => {
+                    await handsDetector.send({ image: video });
+                },
+                width: 640,
+                height: 480
+            });
+            
+            cameraInstance.start();
+        }
+        
+        function onHandsResults(results) {
+            hands = results.multiHandLandmarks || [];
+            
+            // Clear previous finger labels
+            document.querySelectorAll('.finger-label').forEach(el => el.remove());
+            
+            if (hands.length > 0) {
+                hands.forEach((handLandmarks, handIndex) => {
+                    const handedness = results.multiHandedness[handIndex].label;
+                    
+                    // Calculate palm center (landmark 0 is wrist, 9 is middle finger base)
+                    const palmX = handLandmarks[9].x * window.innerWidth;
+                    const palmY = handLandmarks[9].y * window.innerHeight;
+                    
+                    if (handedness === 'Left') {
+                        leftHandCenter = { x: palmX, y: palmY };
+                        checkLeftHandFingers(handLandmarks);
+                    } else {
+                        rightHandCenter = { x: palmX, y: palmY };
+                        checkRightHandFingers(handLandmarks);
+                    }
+                    
+                    // Display finger tips
+                    const fingerTips = [4, 8, 12, 16, 20]; // Thumb, Index, Middle, Ring, Pinky
+                    fingerTips.forEach((tipIndex, i) => {
+                        const tip = handLandmarks[tipIndex];
+                        const x = tip.x * window.innerWidth;
+                        const y = tip.y * window.innerHeight;
+                        
+                        const label = document.createElement('div');
+                        label.className = 'finger-label';
+                        label.style.left = `${x}px`;
+                        label.style.top = `${y - 20}px`;
+                        label.textContent = `${i + 1}`;
+                        document.body.appendChild(label);
+                    });
+                });
+            } else {
+                leftHandCenter = null;
+                rightHandCenter = null;
+                leftHandFingers = {};
+                rightHandFingers = {};
+            }
+            
+            updateMode();
+        }
+        
+        function isFingerExtended(handLandmarks, fingerTipIndex, fingerBaseIndex) {
+            return handLandmarks[fingerTipIndex].y < handLandmarks[fingerBaseIndex].y;
+        }
+        
+        function checkLeftHandFingers(handLandmarks) {
+            leftHandFingers = {
+                1: handLandmarks[4].x > handLandmarks[3].x, // Thumb
+                2: isFingerExtended(handLandmarks, 8, 6),    // Index
+                3: isFingerExtended(handLandmarks, 12, 10),  // Middle
+                4: isFingerExtended(handLandmarks, 16, 14),  // Ring
+                5: isFingerExtended(handLandmarks, 20, 18)   // Pinky
+            };
+        }
+        
+        function checkRightHandFingers(handLandmarks) {
+            const allFingers = isFingerExtended(handLandmarks, 8, 6) &&
+                             isFingerExtended(handLandmarks, 12, 10) &&
+                             isFingerExtended(handLandmarks, 16, 14) &&
+                             isFingerExtended(handLandmarks, 20, 18);
+            
+            rightHandFingers = {
+                open: allFingers
+            };
+        }
+        
+        function updateMode() {
+            let newMode = 'DEFAULT';
+            
+            // Check for Catch Mode (Left hand open, all fingers extended)
+            if (Object.keys(leftHandFingers).length > 0 && 
+                leftHandFingers[2] && leftHandFingers[3] && 
+                leftHandFingers[4] && leftHandFingers[5]) {
+                newMode = 'CATCH';
+            }
+            
+            // Check for dual hand combo (Nebula mode)
+            if (leftHandCenter && rightHandCenter && rightHandFingers.open) {
+                newMode = 'NEBULA';
+            }
+            
+            mode = newMode;
+        }
+        
+        // Physics and particle updates
+        function updateParticles() {
+            const positions = geometry.attributes.position.array;
+            const colors = geometry.attributes.color.array;
+            
+            for (let i = 0; i < PARTICLE_COUNT * 3; i += 3) {
+                const x = positions[i];
+                const y = positions[i + 1];
+                const z = positions[i + 2];
+                
+                // Convert 3D to 2D screen coordinates for hand interaction
+                const vector = new THREE.Vector3(x, y, z);
+                vector.project(camera);
+                const screenX = (vector.x + 1) * window.innerWidth / 2;
+                const screenY = (-vector.y + 1) * window.innerHeight / 2;
+                
+                let forceX = 0, forceY = 0, forceZ = 0;
+                
+                if (mode === 'DEFAULT' && leftHandCenter) {
+                    // Scatter effect
+                    const dx = screenX - leftHandCenter.x;
+                    const dy = screenY - leftHandCenter.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < 200) {
+                        const force = (200 - distance) / 200;
+                        forceX = (dx / distance) * force * 5;
+                        forceY = -(dy / distance) * force * 5;
+                        
+                        // Color change for scattered particles
+                        colors[i] = 1;
+                        colors[i + 1] = 0;
+                        colors[i + 2] = 0;
+                    }
+                } else if (mode === 'CATCH' && leftHandCenter) {
+                    // Attract particles to hand
+                    const dx = screenX - leftHandCenter.x;
+                    const dy = screenY - leftHandCenter.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < 300) {
+                        const force = 1 - (distance / 300);
+                        forceX = -(dx / distance) * force * 8;
+                        forceY = (dy / distance) * force * 8;
+                        
+                        colors[i] = 0;
+                        colors[i + 1] = 1;
+                        colors[i + 2] = 0;
+                    }
+                } else if (mode === 'NEBULA' && leftHandCenter && rightHandCenter) {
+                    // Fill screen with particles and water ripple effect
+                    const lx = screenX - leftHandCenter.x;
+                    const ly = screenY - leftHandCenter.y;
+                    const ldist = Math.sqrt(lx * lx + ly * ly);
+                    
+                    if (ldist < 400) {
+                        const time = Date.now() * 0.001;
+                        const wave = Math.sin(ldist * 0.1 - time * 3) * 2;
+                        forceX = (lx / ldist) * wave;
+                        forceY = -(ly / ldist) * wave;
+                        
+                        colors[i] = 0.5;
+                        colors[i + 1] = 0.5;
+                        colors[i + 2] = 1;
+                    }
+                    
+                    // Basketball effect in right hand
+                    const rx = screenX - rightHandCenter.x;
+                    const ry = screenY - rightHandCenter.y;
+                    const rdist = Math.sqrt(rx * rx + ry * ry);
+                    
+                    if (rdist < 150) {
+                        const angle = Math.atan2(ry, rx);
+                        const time = Date.now() * 0.003;
+                        const bounceY = Math.abs(Math.sin(time + i * 0.01)) * 3;
+                        
+                        forceX = Math.cos(angle + time) * 2;
+                        forceY = bounceY;
+                        
+                        colors[i] = 1;
+                        colors[i + 1] = 0.5;
+                        colors[i + 2] = 0;
+                    }
+                }
+                
+                // Apply forces
+                velocities[i] = velocities[i] * 0.95 + forceX;
+                velocities[i + 1] = velocities[i + 1] * 0.95 + forceY;
+                velocities[i + 2] = velocities[i + 2] * 0.95 + forceZ;
+                
+                // Update positions
+                positions[i] += velocities[i] * 0.16;
+                positions[i + 1] += velocities[i + 1] * 0.16;
+                positions[i + 2] += velocities[i + 2] * 0.16;
+                
+                // Boundaries (keep particles in view)
+                if (Math.abs(positions[i]) > 100) positions[i] *= 0.95;
+                if (Math.abs(positions[i + 1]) > 100) positions[i + 1] *= 0.95;
+                if (Math.abs(positions[i + 2]) > 50) positions[i + 2] *= 0.95;
+                
+                // Reset color gradually
+                if (mode === 'DEFAULT' && !leftHandCenter) {
+                    colors[i] = colors[i] * 0.95 + 0 * 0.05;
+                    colors[i + 1] = colors[i + 1] * 0.95 + 1 * 0.05;
+                    colors[i + 2] = colors[i + 2] * 0.95 + 1 * 0.05;
+                }
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+        }
+        
+        // Text rendering
+        function renderText() {
+            // Check finger states for text display
+            Object.keys(leftHandFingers).forEach(finger => {
+                if (leftHandFingers[finger] && fingerLabels[finger]) {
+                    // In a real implementation, you'd use canvas text or Three.js text geometry
+                    // For simplicity, showing in HUD
+                }
+            });
+        }
+        
+        // FPS counter
+        let lastTime = performance.now();
+        let frames = 0;
+        let fps = 0;
+        
+        function updateFPS() {
+            frames++;
+            const now = performance.now();
+            if (now >= lastTime + 1000) {
+                fps = Math.round((frames * 1000) / (now - lastTime));
+                frames = 0;
+                lastTime = now;
+            }
+        }
+        
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            updateParticles();
+            updateFPS();
+            
+            // Update HUD
+            document.getElementById('fps').textContent = `FPS: ${fps}`;
+            document.getElementById('particles').textContent = `PARTICLES: ${PARTICLE_COUNT}`;
+            document.getElementById('hands').textContent = `HANDS: ${hands.length}`;
+            document.getElementById('mode').textContent = `MODE: ${mode}`;
+            
+            // Rotate scene slightly for visual effect
+            particles.rotation.y += 0.001;
+            
+            renderer.render(scene, camera);
+        }
+        
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        
+        // Initialize everything
+        async function init() {
+            await setupCamera();
+            await setupHands();
+            document.getElementById('loading').style.display = 'none';
+            animate();
+        }
+        
+        init();
+    </script>
+</body>
+</html>
